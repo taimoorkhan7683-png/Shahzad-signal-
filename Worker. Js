@@ -1,0 +1,42 @@
+// backend/workers/worker.js
+// This worker is a scaffold: it should be run as a separate process (node worker.js)
+// It will connect to exchanges (MEXC/Binance) via WebSocket/REST to fetch OHLC, orderbook and compute composite scores.
+// For security, put API keys in environment variables and DO NOT commit them.
+const fetch = require('node-fetch');
+const { rsi } = require('../lib/indicators');
+
+async function fetchOHLC(coin='bitcoin', days=1){
+  const url = `https://api.coingecko.com/api/v3/coins/${coin}/ohlc?vs_currency=usd&days=${days}`;
+  const r = await fetch(url); const j = await r.json(); // array [time, open, high, low, close]
+  return j;
+}
+
+function computeSimpleScore(closes){
+  const r = rsi(closes.map(c=>c[4] || c)).slice(-1)[0] || 50;
+  // simple score: lower RSI bullish (oversold) -> higher score
+  const score = Math.max(0, Math.min(1, (60 - r) / 40));
+  return score;
+}
+
+async function runOnce(){
+  try{
+    const coins = ['bitcoin','ethereum','solana','dogecoin','litecoin','chainlink'];
+    const results = [];
+    for(const c of coins){
+      const ohlc = await fetchOHLC(c,1);
+      if(!Array.isArray(ohlc) || ohlc.length<20) continue;
+      const score = computeSimpleScore(ohlc);
+      const last = ohlc[ohlc.length-1][4];
+      results.push({ symbol: c.toUpperCase(), score: score.toFixed(3), signal: score>0.6? 'BUY':'WAIT', entry: last, sl: (last*0.98).toFixed(6), tp1: (last*1.03).toFixed(6) });
+    }
+    // push to backend
+    await fetch((process.env.BACKEND_URL || 'http://localhost:4000') + '/api/push-signals', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ list: results })
+    });
+    console.log('Worker pushed results', results);
+  }catch(e){ console.error('Worker error', e); }
+}
+
+if(require.main === module){
+  runOnce();
+}
